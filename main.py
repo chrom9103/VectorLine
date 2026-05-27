@@ -1,10 +1,10 @@
 """
 ===========================================================================
-骨格検知 (MediaPipe Pose) — 33点リアルタイム骨格トラッキングモジュール
+ハンドトラッキング (MediaPipe Hands) — リアルタイム手検出モジュール
 非同期カメラキャプチャ対応 スレッドセーフ推論
 ===========================================================================
 前提ライブラリ:
-    mediapipe == 0.10.21    (MediaPipe Pose, 33-landmark)
+    mediapipe == 0.10.21    (MediaPipe Hands)
     opencv-contrib-python == 4.11.0.86
     numpy == 1.26.4         (MediaPipe の C-API 要件: numpy < 2.x)
     protobuf == 4.25.6
@@ -105,37 +105,34 @@ class ThreadedCamera:
 
 
 # ===========================================================================
-# B. メイン骨格検知システム
+# B. メインハンドトラッキングシステム
 # ===========================================================================
 def main() -> None:
     """
-    MediaPipe Pose による 33点リアルタイム骨格トラッキングループ。
+    MediaPipe Hands によるリアルタイムハンドトラッキングループ。
 
     処理フロー:
-        1. MediaPipe Pose (33ランドマーク) の初期化
+        1. MediaPipe Hands の初期化
         2. ThreadedCamera の起動
         3. 推論・描画・表示ループ
         4. クリーンアップ (finally ブロックで確実に実行)
     """
 
     # -----------------------------------------------------------------------
-    # 1. MediaPipe Pose の初期化
+    # 1. MediaPipe Hands の初期化
     # -----------------------------------------------------------------------
-    print("[*] MediaPipe Pose を初期化中...")
-    mp_pose = mp.solutions.pose
+    print("[*] MediaPipe Hands を初期化中...")
+    mp_hands = mp.solutions.hands
     mp_drawing = mp.solutions.drawing_utils
     mp_drawing_styles = mp.solutions.drawing_styles
 
-    pose_estimator = mp_pose.Pose(
+    hands_estimator = mp_hands.Hands(
         static_image_mode=False,       # 動画ストリーム向けトラッキングモード
-        model_complexity=1,            # 0=Lite / 1=Full / 2=Heavy
-        smooth_landmarks=True,         # ジッター抑制フィルタ有効化
-        enable_segmentation=False,     # セグメンテーションは不使用 (負荷削減)
-        smooth_segmentation=False,
+        max_num_hands=2,               # 検出する手の最大数
         min_detection_confidence=0.5,  # 初期検出の信頼度閾値
         min_tracking_confidence=0.5,   # トラッキング維持の信頼度閾値
     )
-    print("[*] MediaPipe Pose の初期化完了。")
+    print("[*] MediaPipe Hands の初期化完了。")
 
     # -----------------------------------------------------------------------
     # 2. 非同期カメラキャプチャの起動
@@ -146,7 +143,7 @@ def main() -> None:
         camera.start()
     except RuntimeError as e:
         print(f"[!] {e}")
-        pose_estimator.close()
+        hands_estimator.close()
         sys.exit(1)
 
     # カメラバッファが満たされるまで待機 (最初の数フレームはゴミデータの場合がある)
@@ -176,21 +173,23 @@ def main() -> None:
             # writeable=False にすることで内部コピーを回避しメモリ転送を最適化
             rgb_frame.flags.writeable = False
 
-            # --- (b) MediaPipe Pose 骨格推論 ---
-            pose_results = pose_estimator.process(rgb_frame)
+            # --- (b) MediaPipe Hands 推論 ---
+            hands_results = hands_estimator.process(rgb_frame)
 
             # writeable フラグを戻す (描画時に必要)
             rgb_frame.flags.writeable = True
 
-            # --- (c) 骨格ランドマークの描画 ---
+            # --- (c) 手のランドマークの描画 ---
             # draw_landmarks は BGR フレームへ直接描画する (内部で色変換は行わない)
-            if pose_results.pose_landmarks:
-                mp_drawing.draw_landmarks(
-                    image=frame,
-                    landmark_list=pose_results.pose_landmarks,
-                    connections=mp_pose.POSE_CONNECTIONS,
-                    landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style(),
-                )
+            if hands_results.multi_hand_landmarks:
+                for hand_landmarks in hands_results.multi_hand_landmarks:
+                    mp_drawing.draw_landmarks(
+                        image=frame,
+                        landmark_list=hand_landmarks,
+                        connections=mp_hands.HAND_CONNECTIONS,
+                        landmark_drawing_spec=mp_drawing_styles.get_default_hand_landmarks_style(),
+                        connection_drawing_spec=mp_drawing_styles.get_default_hand_connections_style()
+                    )
 
             # --- (d) FPS の HUD 表示 ---
             curr_time = time.perf_counter()
@@ -198,13 +197,13 @@ def main() -> None:
             fps = 1.0 / elapsed if elapsed > 0 else 0.0
             prev_time = curr_time
 
-            hud_text = f"MediaPipe Pose | FPS: {fps:.1f} | Frame: {frame_count}"
+            hud_text = f"MediaPipe Hands | FPS: {fps:.1f} | Frame: {frame_count}"
             # 影付き文字で視認性を高める
             cv2.putText(frame, hud_text, (11, 31), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 4)
             cv2.putText(frame, hud_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 100), 2)
 
             # --- (e) フレームの表示 ---
-            cv2.imshow("VectorLine — MediaPipe Pose 33-Landmark Skeleton", frame)
+            cv2.imshow("VectorLine — MediaPipe Hands Tracking", frame)
 
             # 'q' キーで終了
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -221,7 +220,7 @@ def main() -> None:
         print("[*] リソースを解放中...")
         camera.stop()            # VideoCaptureの解放とスレッド終了
         cv2.destroyAllWindows()  # 全 OpenCV ウィンドウの破棄
-        pose_estimator.close()   # MediaPipe モデルのクローズ
+        hands_estimator.close()   # MediaPipe モデルのクローズ
         print("[*] システムは安全に停止されました。")
 
 
