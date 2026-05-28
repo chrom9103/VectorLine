@@ -20,6 +20,7 @@ import cv2
 import sys
 import time
 import threading
+import argparse
 import numpy as np
 import mediapipe as mp
 from dataclasses import dataclass
@@ -35,12 +36,8 @@ class ThreadedCamera:
     推論負荷に関わらず常に最新フレームをバッファリングする。
     """
 
-    def __init__(self, src: int = 0, width: int = 1280, height: int = 720) -> None:
-        # DirectShow バックエンドで開く (MSMF/NVIDIA Broadcast との競合回避)
-        self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
-        if not self.cap.isOpened():
-            print("[!] DirectShow で開けませんでした。デフォルトバックエンドで再試行します...")
-            self.cap = cv2.VideoCapture(src)
+    def __init__(self, src: int | str = 0, width: int = 1280, height: int = 720) -> None:
+        self.cap = self._open_capture(src)
         if not self.cap.isOpened():
             raise RuntimeError(
                 f"[FATAL] カメラデバイス (src={src}) を開けません。"
@@ -80,6 +77,42 @@ class ThreadedCamera:
             self.thread.join(timeout=3.0)
         self.cap.release()
         print("[*] カメラリソースを解放しました。")
+
+    @staticmethod
+    def _open_capture(src: int | str) -> cv2.VideoCapture:
+        """利用可能なバックエンドを順に試して VideoCapture を開く。"""
+        # パスが与えられた場合はそのパスで開く
+        if isinstance(src, str) and src and not src.isdigit():
+            return cv2.VideoCapture(src)
+
+        index = int(src)
+        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+        for backend in backends:
+            capture = cv2.VideoCapture(index, backend)
+            if capture.isOpened():
+                if backend == cv2.CAP_DSHOW:
+                    print("[*] DirectShow でカメラを開きました。")
+                elif backend == cv2.CAP_MSMF:
+                    print("[*] MSMF でカメラを開きました。")
+                else:
+                    print("[*] OpenCV のデフォルトバックエンドでカメラを開きました。")
+                return capture
+            capture.release()
+
+        # どれもダメならデフォルトで試す
+        return cv2.VideoCapture(index)
+
+
+def _discover_camera_index(max_index: int = 10) -> int | None:
+    """利用可能なカメラインデックスを 0..max_index の範囲で探索して返す。"""
+    for index in range(max_index + 1):
+        for backend in (cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY):
+            cap = cv2.VideoCapture(index, backend)
+            ok = cap.isOpened()
+            cap.release()
+            if ok:
+                return index
+    return None
 
 
 # ===========================================================================
@@ -217,6 +250,12 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # 1. MediaPipe Hands の初期化
     # -----------------------------------------------------------------------
+    parser = argparse.ArgumentParser(description="VectorLine MediaPipe Hands Tracker")
+    parser.add_argument("--source", default=None, help="カメラ番号または動画ファイルのパスを指定します")
+    parser.add_argument("--width", type=int, default=1280, help="カメラ幅")
+    parser.add_argument("--height", type=int, default=720, help="カメラ高さ")
+    args = parser.parse_args()
+
     print("[*] MediaPipe Hands を初期化中...")
     mp_hands         = mp.solutions.hands
     mp_drawing       = mp.solutions.drawing_utils
@@ -231,11 +270,21 @@ def main() -> None:
     print("[*] MediaPipe Hands の初期化完了。")
 
     # -----------------------------------------------------------------------
-    # 2. カメラ起動
+    # 2. カメラ起動（引数 --source があればそれを使用、なければ自動探索）
     # -----------------------------------------------------------------------
-    print("\n[*] カメラデバイスを起動中 (src=0, 1280x720)...")
+    source = args.source
+    if source is None:
+        discovered = _discover_camera_index()
+        if discovered is None:
+            print("\n[!] 利用可能なカメラインデックスを見つけられませんでした。")
+            print("[!] `--source 0` のように番号を明示するか、USBカメラ接続と Windows のカメラ許可を確認してください。")
+            hands_estimator.close()
+            sys.exit(1)
+        source = discovered
+
+    print(f"\n[*] カメラデバイスを起動中 (src={source}, {args.width}x{args.height})...")
     try:
-        camera = ThreadedCamera(src=0, width=1280, height=720)
+        camera = ThreadedCamera(src=source, width=args.width, height=args.height)
         camera.start()
     except RuntimeError as e:
         print(f"[!] {e}")
